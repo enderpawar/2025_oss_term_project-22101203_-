@@ -27,6 +27,17 @@ export type NodeKind =
     | 'buy'
     | 'sell'
     | 'branch'
+    // ML Pipeline Nodes
+    | 'dataLoader'
+    | 'dataSplit'
+    | 'scaler'
+    | 'featureSelection'
+    | 'classifier'
+    | 'regressor'
+    | 'neuralNet'
+    | 'evaluate'
+    | 'predict'
+    | 'hyperparamTune'
 
 export type SerializedGraph = {
     nodes: Array<{
@@ -241,6 +252,122 @@ export class BranchNode extends TradeNode {
         this.addOutput('false', new ClassicPreset.Output(flowSocket, '거짓'))
         this.kind = 'branch'
         this.category = 'flow'
+    }
+}
+
+// -------------------- ML Pipeline Nodes --------------------
+
+export class DataLoaderNode extends TradeNode {
+    constructor() {
+        super('데이터 로더')
+        this.addOutput('data', new ClassicPreset.Output(numberSocket, '데이터'))
+        this.addControl('fileType', new ClassicPreset.InputControl('text', { initial: 'CSV' }))
+        this.addControl('path', new ClassicPreset.InputControl('text', { initial: '' }))
+        this.kind = 'dataLoader'
+        this.category = 'ml-source'
+    }
+}
+
+export class DataSplitNode extends TradeNode {
+    constructor() {
+        super('데이터 분할')
+        this.addInput('data', new ClassicPreset.Input(numberSocket, '데이터'))
+        this.addOutput('train', new ClassicPreset.Output(numberSocket, '훈련'))
+        this.addOutput('test', new ClassicPreset.Output(numberSocket, '테스트'))
+        this.addControl('ratio', new ClassicPreset.InputControl('number', { initial: 0.8 }))
+        this.kind = 'dataSplit'
+        this.category = 'ml-preprocessing'
+    }
+}
+
+export class ScalerNode extends TradeNode {
+    constructor() {
+        super('정규화')
+        this.addInput('data', new ClassicPreset.Input(numberSocket, '데이터'))
+        this.addOutput('scaled', new ClassicPreset.Output(numberSocket, '정규화됨'))
+        this.addControl('method', new ClassicPreset.InputControl('text', { initial: 'StandardScaler' }))
+        this.kind = 'scaler'
+        this.category = 'ml-preprocessing'
+    }
+}
+
+export class FeatureSelectionNode extends TradeNode {
+    constructor() {
+        super('피처 선택')
+        this.addInput('data', new ClassicPreset.Input(numberSocket, '데이터'))
+        this.addOutput('selected', new ClassicPreset.Output(numberSocket, '선택됨'))
+        this.addControl('method', new ClassicPreset.InputControl('text', { initial: 'SelectKBest' }))
+        this.addControl('k', new ClassicPreset.InputControl('number', { initial: 10 }))
+        this.kind = 'featureSelection'
+        this.category = 'ml-preprocessing'
+    }
+}
+
+export class ClassifierNode extends TradeNode {
+    constructor() {
+        super('분류기')
+        this.addInput('train', new ClassicPreset.Input(numberSocket, '훈련'))
+        this.addOutput('model', new ClassicPreset.Output(numberSocket, '모델'))
+        this.addControl('algorithm', new ClassicPreset.InputControl('text', { initial: 'RandomForest' }))
+        this.addControl('n_estimators', new ClassicPreset.InputControl('number', { initial: 100 }))
+        this.kind = 'classifier'
+        this.category = 'ml-model'
+    }
+}
+
+export class RegressorNode extends TradeNode {
+    constructor() {
+        super('회귀')
+        this.addInput('train', new ClassicPreset.Input(numberSocket, '훈련'))
+        this.addOutput('model', new ClassicPreset.Output(numberSocket, '모델'))
+        this.addControl('algorithm', new ClassicPreset.InputControl('text', { initial: 'LinearRegression' }))
+        this.kind = 'regressor'
+        this.category = 'ml-model'
+    }
+}
+
+export class NeuralNetNode extends TradeNode {
+    constructor() {
+        super('신경망')
+        this.addInput('train', new ClassicPreset.Input(numberSocket, '훈련'))
+        this.addOutput('model', new ClassicPreset.Output(numberSocket, '모델'))
+        this.addControl('layers', new ClassicPreset.InputControl('text', { initial: '64,32' }))
+        this.addControl('epochs', new ClassicPreset.InputControl('number', { initial: 50 }))
+        this.kind = 'neuralNet'
+        this.category = 'ml-model'
+    }
+}
+
+export class EvaluateNode extends TradeNode {
+    constructor() {
+        super('평가')
+        this.addInput('model', new ClassicPreset.Input(numberSocket, '모델'))
+        this.addInput('test', new ClassicPreset.Input(numberSocket, '테스트'))
+        this.addOutput('metrics', new ClassicPreset.Output(numberSocket, '지표'))
+        this.kind = 'evaluate'
+        this.category = 'ml-evaluation'
+    }
+}
+
+export class PredictNode extends TradeNode {
+    constructor() {
+        super('예측')
+        this.addInput('model', new ClassicPreset.Input(numberSocket, '모델'))
+        this.addInput('data', new ClassicPreset.Input(numberSocket, '데이터'))
+        this.addOutput('prediction', new ClassicPreset.Output(numberSocket, '예측값'))
+        this.kind = 'predict'
+        this.category = 'ml-prediction'
+    }
+}
+
+export class HyperparamTuneNode extends TradeNode {
+    constructor() {
+        super('하이퍼파라미터 튜닝')
+        this.addInput('train', new ClassicPreset.Input(numberSocket, '훈련'))
+        this.addOutput('best_model', new ClassicPreset.Output(numberSocket, '최적모델'))
+        this.addControl('method', new ClassicPreset.InputControl('text', { initial: 'GridSearch' }))
+        this.kind = 'hyperparamTune'
+        this.category = 'ml-optimization'
     }
 }
 
@@ -869,6 +996,27 @@ export function createNodeByKind(kind: NodeKind): TradeNode {
         // Branch/Flow
         case 'branch':
             return new BranchNode()
+        // ML Pipeline Nodes
+        case 'dataLoader':
+            return new DataLoaderNode()
+        case 'dataSplit':
+            return new DataSplitNode()
+        case 'scaler':
+            return new ScalerNode()
+        case 'featureSelection':
+            return new FeatureSelectionNode()
+        case 'classifier':
+            return new ClassifierNode()
+        case 'regressor':
+            return new RegressorNode()
+        case 'neuralNet':
+            return new NeuralNetNode()
+        case 'evaluate':
+            return new EvaluateNode()
+        case 'predict':
+            return new PredictNode()
+        case 'hyperparamTune':
+            return new HyperparamTuneNode()
         // 제거된/미지원 노드 안전 처리
         case 'stock':
             throw new Error('Deprecated node kind: stock')

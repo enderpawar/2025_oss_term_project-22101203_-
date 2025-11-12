@@ -3,6 +3,7 @@ import { useToast } from './toast/ToastProvider.jsx';
 import { useReteAppEditor } from '../hooks/useReteAppEditor';
 import { createNodeByKind, clientToWorld, exportGraph, importGraph } from '../rete/app-editor';
 import { loadLogic as loadLogicFromStorage, loadTheme, saveTheme } from '../utils/logicStorage';
+import { generatePythonCode, generateJupyterNotebook, generatePythonScript } from '../utils/pipelineToCode';
 
 // ----------------------------------------------------------------
 // LogicEditorPage: 매수 / 매도 로직을 편집하는 컴포넌트
@@ -19,6 +20,8 @@ const LogicEditorPage = ({ selectedLogicId, onBack, onSave, defaultNewLogicName 
     const { editorRef: buyEditorRef, areaRef: buyAreaRef, ready: buyReady } = useReteAppEditor(buyCanvasRef);
     const { editorRef: sellEditorRef, areaRef: sellAreaRef, ready: sellReady } = useReteAppEditor(sellCanvasRef);
     const [expanded, setExpanded] = useState(null); // 'buy' | 'sell' | null
+    const [showCodePreview, setShowCodePreview] = useState(false);
+    const [generatedCode, setGeneratedCode] = useState('');
 
     // 초기 테마 동기화 (localStorage > document > 시스템 선호)
     useEffect(() => {
@@ -135,7 +138,12 @@ const LogicEditorPage = ({ selectedLogicId, onBack, onSave, defaultNewLogicName 
             if (!dt) return null;
             const raw = (dt.getData('application/x-rete-node') || dt.getData('text/plain') || '').trim();
             if (!raw) return null;
-            const allowed = ['const','currentPrice','highestPrice','rsi','roi','sma','compare','logicOp','buy','sell','rl','branch'];
+            const allowed = [
+                // Original nodes
+                'const','currentPrice','highestPrice','rsi','roi','sma','compare','logicOp','buy','sell','rl','branch',
+                // ML Pipeline nodes
+                'dataLoader','dataSplit','scaler','featureSelection','classifier','regressor','neuralNet','evaluate','predict','hyperparamTune'
+            ];
             // exact match 우선
             if (allowed.includes(raw)) return raw;
             // 다중 줄/문자 포함 시 포함 여부로 추출
@@ -148,16 +156,27 @@ const LogicEditorPage = ({ selectedLogicId, onBack, onSave, defaultNewLogicName 
             e.preventDefault();
             const kind = extractKind(e.dataTransfer);
             if (!kind) return;
-            const allowed = ['const','currentPrice','highestPrice','rsi','roi','sma','compare','logicOp','buy','sell','rl','branch'];
+            const allowed = [
+                // Original nodes
+                'const','currentPrice','highestPrice','rsi','roi','sma','compare','logicOp','buy','sell','rl','branch',
+                // ML Pipeline nodes
+                'dataLoader','dataSplit','scaler','featureSelection','classifier','regressor','neuralNet','evaluate','predict','hyperparamTune'
+            ];
             if (!allowed.includes(kind)) { console.warn('드롭된 kind 무시:', kind); return; }
 
-            // 그래프별 제한 규칙 적용
-            if (which === 'buy') {
-                if (kind === 'sell') { toast.error('[드롭 차단] Sell 노드는 Buy 그래프에 추가 불가'); return; }
-                if (kind === 'roi') { toast.error('[드롭 차단] ROI 노드는 Buy 그래프에 추가 불가'); return; }
-            }
-            if (which === 'sell') {
-                if (kind === 'buy') { toast.error('[드롭 차단] Buy 노드는 Sell 그래프에 추가 불가'); return; }
+            // ML 노드는 그래프 제한 없음 (어느 캔버스든 사용 가능)
+            const mlNodes = ['dataLoader','dataSplit','scaler','featureSelection','classifier','regressor','neuralNet','evaluate','predict','hyperparamTune'];
+            const isMLNode = mlNodes.includes(kind);
+
+            // 그래프별 제한 규칙 적용 (ML 노드 제외)
+            if (!isMLNode) {
+                if (which === 'buy') {
+                    if (kind === 'sell') { toast.error('[드롭 차단] Sell 노드는 Buy 그래프에 추가 불가'); return; }
+                    if (kind === 'roi') { toast.error('[드롭 차단] ROI 노드는 Buy 그래프에 추가 불가'); return; }
+                }
+                if (which === 'sell') {
+                    if (kind === 'buy') { toast.error('[드롭 차단] Buy 노드는 Sell 그래프에 추가 불가'); return; }
+                }
             }
 
             const editorRef = which === 'buy' ? buyEditorRef : sellEditorRef;
@@ -210,6 +229,83 @@ const LogicEditorPage = ({ selectedLogicId, onBack, onSave, defaultNewLogicName 
         }
     };
 
+    // Python 코드 생성 및 미리보기
+    const handleGenerateCode = useCallback(() => {
+        const buyEditor = buyEditorRef.current;
+        const buyArea = buyAreaRef.current;
+        const sellEditor = sellEditorRef.current;
+        const sellArea = sellAreaRef.current;
+
+        const buyGraph = buyEditor && buyArea ? exportGraph(buyEditor, buyArea) : { nodes: [], connections: [] };
+        const sellGraph = sellEditor && sellArea ? exportGraph(sellEditor, sellArea) : { nodes: [], connections: [] };
+
+        // Buy와 Sell 그래프 합치기
+        const combinedGraph = {
+            nodes: [...buyGraph.nodes, ...sellGraph.nodes],
+            connections: [...buyGraph.connections, ...sellGraph.connections]
+        };
+
+        const code = generatePythonCode(combinedGraph);
+        setGeneratedCode(code);
+        setShowCodePreview(true);
+    }, [buyEditorRef, buyAreaRef, sellEditorRef, sellAreaRef]);
+
+    // Jupyter Notebook 다운로드
+    const handleExportJupyter = useCallback(() => {
+        const buyEditor = buyEditorRef.current;
+        const buyArea = buyAreaRef.current;
+        const sellEditor = sellEditorRef.current;
+        const sellArea = sellAreaRef.current;
+
+        const buyGraph = buyEditor && buyArea ? exportGraph(buyEditor, buyArea) : { nodes: [], connections: [] };
+        const sellGraph = sellEditor && sellArea ? exportGraph(sellEditor, sellArea) : { nodes: [], connections: [] };
+
+        const combinedGraph = {
+            nodes: [...buyGraph.nodes, ...sellGraph.nodes],
+            connections: [...buyGraph.connections, ...sellGraph.connections]
+        };
+
+        const notebook = generateJupyterNotebook(combinedGraph, logicName || 'ML Pipeline');
+        
+        const blob = new Blob([notebook], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${logicName || 'pipeline'}.ipynb`;
+        a.click();
+        URL.revokeObjectURL(url);
+
+        toast.success('Jupyter Notebook이 다운로드되었습니다!');
+    }, [buyEditorRef, buyAreaRef, sellEditorRef, sellAreaRef, logicName, toast]);
+
+    // Python Script 다운로드
+    const handleExportPython = useCallback(() => {
+        const buyEditor = buyEditorRef.current;
+        const buyArea = buyAreaRef.current;
+        const sellEditor = sellEditorRef.current;
+        const sellArea = sellAreaRef.current;
+
+        const buyGraph = buyEditor && buyArea ? exportGraph(buyEditor, buyArea) : { nodes: [], connections: [] };
+        const sellGraph = sellEditor && sellArea ? exportGraph(sellEditor, sellArea) : { nodes: [], connections: [] };
+
+        const combinedGraph = {
+            nodes: [...buyGraph.nodes, ...sellGraph.nodes],
+            connections: [...buyGraph.connections, ...sellGraph.connections]
+        };
+
+        const script = generatePythonScript(combinedGraph, logicName || 'ML Pipeline');
+        
+        const blob = new Blob([script], { type: 'text/x-python' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${logicName || 'pipeline'}.py`;
+        a.click();
+        URL.revokeObjectURL(url);
+
+        toast.success('Python 스크립트가 다운로드되었습니다!');
+    }, [buyEditorRef, buyAreaRef, sellEditorRef, sellAreaRef, logicName, toast]);
+
   return (
     <div className="w-full max-w-[1900px] h-[100vh] p-4 sm:p-6 lg:p-8 rounded-3xl shadow-2xl flex flex-col bg-neutral-950 text-gray-200 border border-neutral-800/70">
         {/* 상단 헤더: 로직 이름 수정 및 거래소/종목 선택 + 저장/뒤로가기 버튼 */}
@@ -258,6 +354,28 @@ const LogicEditorPage = ({ selectedLogicId, onBack, onSave, defaultNewLogicName 
                                 >
                                     {theme === 'dark' ? '🌙 Dark' : '☀️ Light'}
                                 </button>
+                {/* Python 코드 생성 버튼들 */}
+                <button 
+                    onClick={handleGenerateCode}
+                    className="px-4 py-2 text-base font-semibold text-white bg-purple-600 rounded-lg hover:bg-purple-500 shadow-[0_10px_30px_-10px_rgba(168,85,247,0.5)]"
+                    title="Python 코드 미리보기"
+                >
+                    🐍 코드 보기
+                </button>
+                <button 
+                    onClick={handleExportJupyter}
+                    className="px-4 py-2 text-base font-semibold text-white bg-orange-600 rounded-lg hover:bg-orange-500 shadow-[0_10px_30px_-10px_rgba(249,115,22,0.5)]"
+                    title="Jupyter Notebook으로 내보내기"
+                >
+                    📓 Jupyter
+                </button>
+                <button 
+                    onClick={handleExportPython}
+                    className="px-4 py-2 text-base font-semibold text-white bg-green-600 rounded-lg hover:bg-green-500 shadow-[0_10px_30px_-10px_rgba(22,163,74,0.5)]"
+                    title="Python 스크립트로 내보내기"
+                >
+                    📄 .py
+                </button>
                 <button onClick={onBack} className="px-4 py-2 text-base font-semibold text-gray-200 bg-neutral-800 border border-neutral-700 rounded-lg hover:bg-neutral-700">
                     &larr; 뒤로가기
                 </button>
@@ -270,34 +388,43 @@ const LogicEditorPage = ({ selectedLogicId, onBack, onSave, defaultNewLogicName 
         {/* 메인 컨텐츠: 왼쪽 노드 목록 + 중앙 캔버스 2영역 + 오른쪽 정보 패널 */}
         <div className="flex flex-grow mt-4 gap-6">
             {/* 1. RETE 노드 (왼쪽 사이드바) */}
-            <div className="w-1/5 p-4 bg-neutral-900/60 rounded-2xl border border-neutral-800/70 flex flex-col text-center gap-7">
+            <div className="w-1/5 p-4 bg-neutral-900/60 rounded-2xl border border-neutral-800/70 flex flex-col text-center gap-7 overflow-y-auto">
                 {[
                     { 
-                        title: 'Supplier', 
+                        title: '📊 Data Source', 
                         items: 
                         [ 
-                            { label: 'Const(상수)', kind: 'const' },
-                            { label: 'CurrentPrice(현재가)', kind: 'currentPrice' },
-                            { label: 'HighestPrice(최고가)', kind: 'highestPrice' },
-                            { label: 'RSI(투자지표)', kind: 'rsi' },
-                            { label: 'ROI(수익률)', kind: 'roi' },
-                            { label: 'SMA(단순 이동 평균)', kind: 'sma' },
-                            { label: 'AI 노드(AI 강화학습)', kind: 'rl' }
+                            { label: 'Data Loader', kind: 'dataLoader' }
                         ]
                     },
                     
                     {
-                        title: 'Condition',
+                        title: '🔧 Preprocessing',
                         items: [
-                            { label: 'Compare(비교)', kind: 'compare' },
-                            { label: 'LogicOp(논리)', kind: 'logicOp' }
+                            { label: 'Data Split', kind: 'dataSplit' },
+                            { label: 'Scaler', kind: 'scaler' },
+                            { label: 'Feature Selection', kind: 'featureSelection' }
                         ]
                     },
                     {
-                        title: 'Consumer',
+                        title: '🤖 Models',
                         items: [
-                            { label: 'Buy(매수)', kind: 'buy' },
-                            { label: 'Sell(매도)', kind: 'sell' }
+                            { label: 'Classifier', kind: 'classifier' },
+                            { label: 'Regressor', kind: 'regressor' },
+                            { label: 'Neural Network', kind: 'neuralNet' }
+                        ]
+                    },
+                    {
+                        title: '📈 Evaluation',
+                        items: [
+                            { label: 'Evaluate Model', kind: 'evaluate' },
+                            { label: 'Predict', kind: 'predict' }
+                        ]
+                    },
+                    {
+                        title: '⚙️ Optimization',
+                        items: [
+                            { label: 'Hyperparameter Tuning', kind: 'hyperparamTune' }
                         ]
                     }
                 ].map((group, i, arr) => (
@@ -384,6 +511,62 @@ const LogicEditorPage = ({ selectedLogicId, onBack, onSave, defaultNewLogicName 
                 </div>
             </div>
         </div>
+
+        {/* Python 코드 미리보기 모달 */}
+        {showCodePreview && (
+            <div 
+                className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4"
+                onClick={() => setShowCodePreview(false)}
+            >
+                <div 
+                    className="bg-neutral-900 rounded-2xl border border-neutral-700 shadow-2xl max-w-4xl w-full max-h-[80vh] flex flex-col"
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    {/* 모달 헤더 */}
+                    <div className="flex items-center justify-between p-6 border-b border-neutral-700">
+                        <h2 className="text-2xl font-bold text-gray-100">🐍 Generated Python Code</h2>
+                        <button 
+                            onClick={() => setShowCodePreview(false)}
+                            className="text-gray-400 hover:text-gray-200 text-2xl"
+                        >
+                            ✕
+                        </button>
+                    </div>
+                    
+                    {/* 코드 영역 */}
+                    <div className="flex-1 overflow-auto p-6">
+                        <pre className="bg-neutral-950 border border-neutral-800 rounded-lg p-4 text-sm text-green-400 font-mono overflow-x-auto">
+                            <code>{generatedCode}</code>
+                        </pre>
+                    </div>
+
+                    {/* 모달 푸터 */}
+                    <div className="flex gap-3 p-6 border-t border-neutral-700">
+                        <button
+                            onClick={() => {
+                                navigator.clipboard.writeText(generatedCode);
+                                toast.success('코드가 클립보드에 복사되었습니다!');
+                            }}
+                            className="flex-1 px-4 py-2 text-base font-semibold text-white bg-purple-600 rounded-lg hover:bg-purple-500"
+                        >
+                            📋 복사하기
+                        </button>
+                        <button
+                            onClick={handleExportJupyter}
+                            className="flex-1 px-4 py-2 text-base font-semibold text-white bg-orange-600 rounded-lg hover:bg-orange-500"
+                        >
+                            📓 Jupyter로 저장
+                        </button>
+                        <button
+                            onClick={handleExportPython}
+                            className="flex-1 px-4 py-2 text-base font-semibold text-white bg-green-600 rounded-lg hover:bg-green-500"
+                        >
+                            📄 .py로 저장
+                        </button>
+                    </div>
+                </div>
+            </div>
+        )}
     </div>
     );
 };
