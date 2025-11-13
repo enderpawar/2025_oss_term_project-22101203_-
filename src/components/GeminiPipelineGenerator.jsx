@@ -10,7 +10,7 @@ import { useToast } from './toast/ToastProvider.jsx';
 /**
  * Gemini API를 사용한 Python 코드 생성 컴포넌트
  */
-const GeminiPipelineGenerator = () => {
+const GeminiPipelineGenerator = ({ onApplyPipeline }) => {
     const toast = useToast();
     const [apiKey, setApiKey] = useState('');
     const [hasApiKey, setHasApiKey] = useState(false);
@@ -317,6 +317,38 @@ const GeminiPipelineGenerator = () => {
                     >
                         {isGenerating ? '🔄 생성 중...' : '✨ AI로 코드 생성하기'}
                     </button>
+
+                    {/* 캔버스에 적용 버튼 */}
+                    {nodeGuide.length > 0 && onApplyPipeline && (
+                        <button
+                            onClick={() => {
+                                onApplyPipeline({ nodes: nodeGuide, connections: nodeGuide.flatMap(g => 
+                                    (g.connections?.from || []).map(c => ({
+                                        source: nodeGuide.find(n => n.step === c.step)?.id,
+                                        sourceOutput: c.output,
+                                        target: g.id,
+                                        targetInput: c.input
+                                    }))
+                                ).filter(c => c.source) });
+                                toast.success('파이프라인이 캔버스에 적용되었습니다!');
+                            }}
+                            style={{
+                                width: '100%',
+                                padding: '12px',
+                                fontSize: '14px',
+                                fontWeight: '600',
+                                backgroundColor: '#10b981',
+                                color: 'white',
+                                border: 'none',
+                                borderRadius: '6px',
+                                cursor: 'pointer',
+                                transition: 'background-color 0.2s',
+                                marginBottom: '15px'
+                            }}
+                        >
+                            🎨 캔버스에 적용하기
+                        </button>
+                    )}
 
                     {/* 노드 배치 가이드 */}
                     {nodeGuide.length > 0 && (

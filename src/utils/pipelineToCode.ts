@@ -23,6 +23,64 @@ export interface GraphData {
     connections: ConnectionData[]
 }
 
+export class PipelineValidationError extends Error {
+    constructor(message: string) {
+        super(message)
+        this.name = 'PipelineValidationError'
+    }
+}
+
+/**
+ * 파이프라인 사전 검증
+ */
+function validatePipelineStructure(nodes: NodeData[], connections: ConnectionData[]): void {
+    // 1. DataLoader 노드 필수
+    const hasDataLoader = nodes.some(n => n.kind === 'dataLoader')
+    if (!hasDataLoader) {
+        throw new PipelineValidationError('파이프라인에 DataLoader 노드가 필요합니다.')
+    }
+
+    // 2. 고립된 노드 검사
+    const connectedNodes = new Set<string>()
+    connections.forEach(conn => {
+        connectedNodes.add(conn.source)
+        connectedNodes.add(conn.target)
+    })
+    
+    const orphanedNodes = nodes.filter(n => 
+        n.kind !== 'dataLoader' && !connectedNodes.has(n.id)
+    )
+    
+    if (orphanedNodes.length > 0) {
+        const orphanLabels = orphanedNodes.map(n => n.label).join(', ')
+        throw new PipelineValidationError(
+            `연결되지 않은 노드가 있습니다: ${orphanLabels}`
+        )
+    }
+
+    // 3. 필수 연결 검증 (예: DataSplit은 데이터 입력 필요)
+    nodes.forEach(node => {
+        const incoming = connections.filter(c => c.target === node.id)
+        
+        if (node.kind === 'dataSplit' && incoming.length === 0) {
+            throw new PipelineValidationError(
+                `${node.label}: DataSplit 노드는 데이터 입력이 필요합니다.`
+            )
+        }
+        
+        if (['classifier', 'regressor', 'neuralNet'].includes(node.kind)) {
+            const hasXTrain = incoming.some(c => c.targetInput === 'X_train')
+            const hasYTrain = incoming.some(c => c.targetInput === 'y_train')
+            
+            if (!hasXTrain || !hasYTrain) {
+                throw new PipelineValidationError(
+                    `${node.label}: 모델 노드는 X_train과 y_train이 모두 필요합니다.`
+                )
+            }
+        }
+    })
+}
+
 /**
  * 노드 그래프를 분석하여 실행 순서 결정 (Topological Sort)
  */
@@ -117,10 +175,10 @@ print(${varName}.head())`
             
             return `# Train/Test Split
 # Target column: '${targetColumn}'
-X = ${sourceVar}.drop('${targetColumn}', axis=1)
-y = ${sourceVar}['${targetColumn}']
+X_all = ${sourceVar}.drop('${targetColumn}', axis=1)
+y_all = ${sourceVar}['${targetColumn}']
 step_${nodeId}_X_train, step_${nodeId}_X_test, step_${nodeId}_y_train, step_${nodeId}_y_test = train_test_split(
-    X, y, test_size=${(1 - ratio).toFixed(2)}, random_state=42
+    X_all, y_all, test_size=${(1 - ratio).toFixed(2)}, random_state=42
 )
 print(f"Train size: {{len(step_${nodeId}_X_train)}}, Test size: {{len(step_${nodeId}_X_test)}}")
 print(f"Target column: '${targetColumn}'")`
@@ -129,48 +187,75 @@ print(f"Target column: '${targetColumn}'")`
         case 'scaler': {
             const method = node.controls?.method || 'StandardScaler'
             
-            // 입력 연결 찾기 - data 입력은 보통 X_train 또는 X_test를 받음
-            const inputConn = connections.find(c => c.target === node.id && c.targetInput === 'data')
+            // 입력 연결 찾기 - X_train과 X_test
+            const xTrainConn = connections.find(c => c.target === node.id && c.targetInput === 'X_train')
+            const xTestConn = connections.find(c => c.target === node.id && c.targetInput === 'X_test')
             
-            if (!inputConn) {
-                return `# WARNING: Scaler has no input connection
+            if (!xTrainConn) {
+                return `# WARNING: Scaler has no X_train input connection
 ${varName} = ${method}()
-# Please connect a data source to this scaler node`
+# Please connect X_train to this scaler node`
             }
             
-            const sourceNodeId = inputConn.source.replace(/[^a-zA-Z0-9]/g, '_')
-            const sourceOutput = inputConn.sourceOutput // 예: 'X_train', 'X_test', 'scaled' 등
+            const xTrainSourceId = xTrainConn.source.replace(/[^a-zA-Z0-9]/g, '_')
+            const xTrainSourceOutput = xTrainConn.sourceOutput
+            const xTrainVar = `step_${xTrainSourceId}_${xTrainSourceOutput}`
             
-            // 소스 변수명 결정
-            let sourceVar = `step_${sourceNodeId}_${sourceOutput}`
+            const nodeId = node.id.replace(/[^a-zA-Z0-9]/g, '_')
             
-            return `# Scale Features
+            // X_test가 연결된 경우
+            if (xTestConn) {
+                const xTestSourceId = xTestConn.source.replace(/[^a-zA-Z0-9]/g, '_')
+                const xTestSourceOutput = xTestConn.sourceOutput
+                const xTestVar = `step_${xTestSourceId}_${xTestSourceOutput}`
+                
+                return `# Scale Features (Train and Test)
 ${varName} = ${method}()
-${varName}_scaled = ${varName}.fit_transform(${sourceVar})
+step_${nodeId}_X_train = ${varName}.fit_transform(${xTrainVar})
+step_${nodeId}_X_test = ${varName}.transform(${xTestVar})
 print("Features scaled using ${method}")
-print(f"Scaled data shape: {${varName}_scaled.shape}")`
+print(f"Scaled train shape: {step_${nodeId}_X_train.shape}")
+print(f"Scaled test shape: {step_${nodeId}_X_test.shape}")`
+            } else {
+                // X_test가 없는 경우 (X_train만)
+                return `# Scale Features (Train only)
+${varName} = ${method}()
+step_${nodeId}_X_train = ${varName}.fit_transform(${xTrainVar})
+print("Features scaled using ${method}")
+print(f"Scaled train shape: {step_${nodeId}_X_train.shape}")
+# Note: X_test not connected - only training data scaled`
+            }
         }
         
         case 'featureSelection': {
             const method = node.controls?.method || 'SelectKBest'
             const k = node.controls?.k || 10
             
-            // 입력 연결 찾기
-            const inputConn = connections.find(c => c.target === node.id && c.targetInput === 'data')
+            // 입력 연결 찾기 (X_train과 y_train)
+            const xTrainConn = connections.find(c => c.target === node.id && c.targetInput === 'X_train')
+            const yTrainConn = connections.find(c => c.target === node.id && c.targetInput === 'y_train')
             
-            if (!inputConn) {
-                return `# WARNING: FeatureSelection has no input connection
-# Please connect data to this feature selection node`
+            if (!xTrainConn || !yTrainConn) {
+                let warnings = '# WARNING: Missing required connections!\n'
+                if (!xTrainConn) warnings += '#   - X_train input not connected\n'
+                if (!yTrainConn) warnings += '#   - y_train input not connected\n'
+                return warnings + '# Please connect training data to this feature selection node'
             }
             
-            const sourceNodeId = inputConn.source.replace(/[^a-zA-Z0-9]/g, '_')
-            const sourceOutput = inputConn.sourceOutput
-            const sourceVar = `step_${sourceNodeId}_${sourceOutput}`
+            const xTrainSourceId = xTrainConn.source.replace(/[^a-zA-Z0-9]/g, '_')
+            const yTrainSourceId = yTrainConn.source.replace(/[^a-zA-Z0-9]/g, '_')
+            const xTrainOutput = xTrainConn.sourceOutput
+            const yTrainOutput = yTrainConn.sourceOutput
+            
+            const xTrainVar = `step_${xTrainSourceId}_${xTrainOutput}`
+            const yTrainVar = `step_${yTrainSourceId}_${yTrainOutput}`
+            
+            const nodeId = node.id.replace(/[^a-zA-Z0-9]/g, '_')
             
             return `# Feature Selection
 ${varName} = ${method}(k=${k})
-${varName}_selected = ${varName}.fit_transform(${sourceVar}, y_train)
-print(f"Selected {k} best features from {${sourceVar}.shape[1]} features")`
+step_${nodeId}_X_train = ${varName}.fit_transform(${xTrainVar}, ${yTrainVar})
+print(f"Selected {k} best features from {${xTrainVar}.shape[1]} features")`
         }
         
         case 'classifier': {
@@ -197,6 +282,8 @@ print(f"Selected {k} best features from {${sourceVar}.shape[1]} features")`
             const xTrainVar = `step_${xTrainSourceId}_${xTrainOutput}`
             const yTrainVar = `step_${yTrainSourceId}_${yTrainOutput}`
             
+            const nodeId = node.id.replace(/[^a-zA-Z0-9]/g, '_')
+            
             let modelCode = ''
             if (algorithm === 'RandomForest') {
                 modelCode = `RandomForestClassifier(n_estimators=${nEstimators}, random_state=42)`
@@ -209,10 +296,10 @@ print(f"Selected {k} best features from {${sourceVar}.shape[1]} features")`
             }
             
             return `# Train Classifier
-${varName} = ${modelCode}
-${varName}.fit(${xTrainVar}, ${yTrainVar})
+step_${nodeId}_model = ${modelCode}
+step_${nodeId}_model.fit(${xTrainVar}, ${yTrainVar})
 print("Model trained: ${algorithm}")
-print(f"Training score: {${varName}.score(${xTrainVar}, ${yTrainVar}):.4f}")`
+print(f"Training score: {step_${nodeId}_model.score(${xTrainVar}, ${yTrainVar}):.4f}")`
         }
         
         case 'regressor': {
@@ -238,6 +325,8 @@ print(f"Training score: {${varName}.score(${xTrainVar}, ${yTrainVar}):.4f}")`
             const xTrainVar = `step_${xTrainSourceId}_${xTrainOutput}`
             const yTrainVar = `step_${yTrainSourceId}_${yTrainOutput}`
             
+            const nodeId = node.id.replace(/[^a-zA-Z0-9]/g, '_')
+            
             let modelCode = ''
             if (algorithm === 'LinearRegression') {
                 modelCode = `LinearRegression()`
@@ -250,10 +339,10 @@ print(f"Training score: {${varName}.score(${xTrainVar}, ${yTrainVar}):.4f}")`
             }
             
             return `# Train Regressor
-${varName} = ${modelCode}
-${varName}.fit(${xTrainVar}, ${yTrainVar})
+step_${nodeId}_model = ${modelCode}
+step_${nodeId}_model.fit(${xTrainVar}, ${yTrainVar})
 print("Model trained: ${algorithm}")
-print(f"Training R² score: {${varName}.score(${xTrainVar}, ${yTrainVar}):.4f}")`
+print(f"Training R² score: {step_${nodeId}_model.score(${xTrainVar}, ${yTrainVar}):.4f}")`
         }
         
         case 'neuralNet': {
@@ -280,11 +369,13 @@ print(f"Training R² score: {${varName}.score(${xTrainVar}, ${yTrainVar}):.4f}")
             const xTrainVar = `step_${xTrainSourceId}_${xTrainOutput}`
             const yTrainVar = `step_${yTrainSourceId}_${yTrainOutput}`
             
+            const nodeId = node.id.replace(/[^a-zA-Z0-9]/g, '_')
+            
             return `# Train Neural Network
-${varName} = MLPClassifier(hidden_layer_sizes=(${layers}), max_iter=${epochs}, random_state=42)
-${varName}.fit(${xTrainVar}, ${yTrainVar})
+step_${nodeId}_model = MLPClassifier(hidden_layer_sizes=(${layers}), max_iter=${epochs}, random_state=42)
+step_${nodeId}_model.fit(${xTrainVar}, ${yTrainVar})
 print("Neural Network trained with layers: [${layers}]")
-print(f"Training score: {${varName}.score(${xTrainVar}, ${yTrainVar}):.4f}")`
+print(f"Training score: {step_${nodeId}_model.score(${xTrainVar}, ${yTrainVar}):.4f}")`
         }
         
         case 'evaluate': {
@@ -292,57 +383,96 @@ print(f"Training score: {${varName}.score(${xTrainVar}, ${yTrainVar}):.4f}")`
             const modelConn = connections.find(c => c.target === node.id && c.targetInput === 'model')
             const xTestConn = connections.find(c => c.target === node.id && c.targetInput === 'X_test')
             const yTestConn = connections.find(c => c.target === node.id && c.targetInput === 'y_test')
+            const predictionConn = connections.find(c => c.target === node.id && c.targetInput === 'prediction')
             
-            // 연결이 없으면 경고
-            if (!modelConn || !xTestConn || !yTestConn) {
-                let warnings = '# WARNING: Missing required connections!\n'
-                if (!modelConn) warnings += '#   - model input not connected\n'
-                if (!xTestConn) warnings += '#   - X_test input not connected\n'
-                if (!yTestConn) warnings += '#   - y_test input not connected\n'
-                return warnings + '# Please connect model and test data to this evaluate node'
+            // 두 가지 평가 모드 지원:
+            // 1. prediction-based: prediction + y_test만 있으면 됨
+            // 2. model-based: model + X_test + y_test가 필요
+            
+            const hasPrediction = !!predictionConn
+            const hasModel = !!modelConn && !!xTestConn
+            
+            if (!hasPrediction && !hasModel) {
+                return `# WARNING: Evaluate node needs either:
+#   Option 1: prediction input + y_test input
+#   Option 2: model input + X_test input + y_test input
+# Please connect the required inputs`
             }
             
-            const modelSourceId = modelConn.source.replace(/[^a-zA-Z0-9]/g, '_')
-            const xTestSourceId = xTestConn.source.replace(/[^a-zA-Z0-9]/g, '_')
-            const yTestSourceId = yTestConn.source.replace(/[^a-zA-Z0-9]/g, '_')
+            if (!yTestConn) {
+                return `# WARNING: y_test input is required for evaluation
+# Please connect y_test data to this evaluate node`
+            }
             
-            const modelVar = `step_${modelSourceId}`
-            const xTestVar = `step_${xTestSourceId}_${xTestConn.sourceOutput}`
+            const yTestSourceId = yTestConn.source.replace(/[^a-zA-Z0-9]/g, '_')
             const yTestVar = `step_${yTestSourceId}_${yTestConn.sourceOutput}`
             
-            return `# Evaluate Model
+            const nodeId = node.id.replace(/[^a-zA-Z0-9]/g, '_')
+            
+            let evaluationCode = ''
+            
+            if (hasPrediction) {
+                // prediction이 이미 있는 경우
+                const predSourceId = predictionConn!.source.replace(/[^a-zA-Z0-9]/g, '_')
+                const predVar = `step_${predSourceId}_${predictionConn!.sourceOutput}`
+                
+                evaluationCode = `# Evaluate Model (using pre-computed predictions)
+step_${nodeId}_metrics = {
+    'accuracy': accuracy_score(${yTestVar}, ${predVar})
+}
+print(f"Accuracy: {step_${nodeId}_metrics['accuracy']:.4f}")
+print("\\nClassification Report:")
+print(classification_report(${yTestVar}, ${predVar}))
+print("\\nConfusion Matrix:")
+print(confusion_matrix(${yTestVar}, ${predVar}))`
+            } else {
+                // model로부터 예측 생성
+                const modelSourceId = modelConn!.source.replace(/[^a-zA-Z0-9]/g, '_')
+                const xTestSourceId = xTestConn!.source.replace(/[^a-zA-Z0-9]/g, '_')
+                
+                const modelVar = `step_${modelSourceId}_model`
+                const xTestVar = `step_${xTestSourceId}_${xTestConn!.sourceOutput}`
+                
+                evaluationCode = `# Evaluate Model
 y_pred = ${modelVar}.predict(${xTestVar})
-accuracy = accuracy_score(${yTestVar}, y_pred)
-print(f"Accuracy: {accuracy:.4f}")
+step_${nodeId}_metrics = {
+    'accuracy': accuracy_score(${yTestVar}, y_pred)
+}
+print(f"Accuracy: {step_${nodeId}_metrics['accuracy']:.4f}")
 print("\\nClassification Report:")
 print(classification_report(${yTestVar}, y_pred))
 print("\\nConfusion Matrix:")
 print(confusion_matrix(${yTestVar}, y_pred))`
+            }
+            
+            return evaluationCode
         }
         
         case 'predict': {
             // 입력 연결 찾기
             const modelConn = connections.find(c => c.target === node.id && c.targetInput === 'model')
-            const dataConn = connections.find(c => c.target === node.id && c.targetInput === 'data')
+            const xTestConn = connections.find(c => c.target === node.id && c.targetInput === 'X_test')
             
             // 연결이 없으면 경고
-            if (!modelConn || !dataConn) {
+            if (!modelConn || !xTestConn) {
                 let warnings = '# WARNING: Missing required connections!\n'
                 if (!modelConn) warnings += '#   - model input not connected\n'
-                if (!dataConn) warnings += '#   - data input not connected\n'
-                return warnings + '# Please connect model and data to this predict node'
+                if (!xTestConn) warnings += '#   - X_test input not connected\n'
+                return warnings + '# Please connect model and X_test data to this predict node'
             }
             
             const modelSourceId = modelConn.source.replace(/[^a-zA-Z0-9]/g, '_')
-            const dataSourceId = dataConn.source.replace(/[^a-zA-Z0-9]/g, '_')
+            const xTestSourceId = xTestConn.source.replace(/[^a-zA-Z0-9]/g, '_')
             
-            const modelVar = `step_${modelSourceId}`
-            const dataVar = `step_${dataSourceId}_${dataConn.sourceOutput}`
+            const modelVar = `step_${modelSourceId}_model`
+            const xTestVar = `step_${xTestSourceId}_${xTestConn.sourceOutput}`
+            
+            const nodeId = node.id.replace(/[^a-zA-Z0-9]/g, '_')
             
             return `# Make Predictions
-${varName} = ${modelVar}.predict(${dataVar})
-print(f"Predictions made: {len(${varName})} samples")
-print(f"First 10 predictions: {${varName}[:10]}")`
+step_${nodeId}_prediction = ${modelVar}.predict(${xTestVar})
+print(f"Predictions made: {len(step_${nodeId}_prediction)} samples")
+print(f"First 10 predictions: {step_${nodeId}_prediction[:10]}")`
         }
         
         case 'hyperparamTune': {
@@ -366,15 +496,18 @@ print(f"First 10 predictions: {${varName}[:10]}")`
             const xTrainVar = `step_${xTrainSourceId}_${xTrainOutput}`
             const yTrainVar = `step_${yTrainSourceId}_${yTrainOutput}`
             
+            const nodeId = node.id.replace(/[^a-zA-Z0-9]/g, '_')
+            
             return `# Hyperparameter Tuning
 param_grid = {
     'n_estimators': [50, 100, 200],
     'max_depth': [10, 20, 30]
 }
-${varName} = GridSearchCV(RandomForestClassifier(random_state=42), param_grid, cv=5)
-${varName}.fit(${xTrainVar}, ${yTrainVar})
-print(f"Best parameters: {${varName}.best_params_}")
-print(f"Best score: {${varName}.best_score_:.4f}")`
+grid_search = GridSearchCV(RandomForestClassifier(random_state=42), param_grid, cv=5)
+grid_search.fit(${xTrainVar}, ${yTrainVar})
+step_${nodeId}_model = grid_search.best_estimator_
+print(f"Best parameters: {grid_search.best_params_}")
+print(f"Best score: {grid_search.best_score_:.4f}")`
         }
         
         default:
@@ -438,7 +571,7 @@ function generateImports(nodes: NodeData[]): string {
  */
 export function generatePythonCode(graph: GraphData): string {
     if (!graph.nodes || graph.nodes.length === 0) {
-        return '# No nodes in the pipeline'
+        throw new PipelineValidationError('파이프라인에 노드가 없습니다.')
     }
     
     // ML 노드만 필터링
@@ -449,8 +582,11 @@ export function generatePythonCode(graph: GraphData): string {
     )
     
     if (mlNodes.length === 0) {
-        return '# No ML nodes in the pipeline'
+        throw new PipelineValidationError('파이프라인에 ML 노드가 없습니다.')
     }
+    
+    // ✅ 파이프라인 구조 검증
+    validatePipelineStructure(mlNodes, graph.connections)
     
     // 노드 실행 순서 결정
     const sortedNodes = topologicalSort(mlNodes, graph.connections)

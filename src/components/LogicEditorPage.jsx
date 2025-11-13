@@ -6,6 +6,8 @@ import { loadLogic as loadLogicFromStorage, loadTheme, saveTheme } from '../util
 import { generatePythonCode, generateJupyterNotebook, generatePythonScript } from '../utils/pipelineToCode';
 import CSVDataManager from './CSVDataManager.jsx';
 import GeminiPipelineGenerator from './GeminiPipelineGenerator.jsx';
+import QuickStartTemplates from './QuickStartTemplates.jsx';
+import BeginnerGuide from './BeginnerGuide.jsx';
 
 // ----------------------------------------------------------------
 // LogicEditorPage: ML 파이프라인을 편집하는 컴포넌트
@@ -50,6 +52,79 @@ const LogicEditorPage = ({ selectedLogicId, onBack, onSave, defaultNewLogicName 
             saveTheme(next);
             return next;
         });
+    }, []);
+
+    // ✅ 파이프라인 검증 함수
+    const validatePipeline = useCallback((pipeline) => {
+        const errors = [];
+
+        // 1. 노드 존재 여부
+        if (!pipeline.nodes || pipeline.nodes.length === 0) {
+            errors.push('파이프라인에 노드가 없습니다.');
+            return errors;
+        }
+
+        // 2. DataLoader 노드 필수
+        const hasDataLoader = pipeline.nodes.some(n => 
+            (n.nodeType || n.type || n.kind) === 'dataLoader'
+        );
+        if (!hasDataLoader) {
+            errors.push('DataLoader 노드가 필요합니다.');
+        }
+
+        // 3. 순환 참조 체크
+        const connections = pipeline.connections || [];
+        const graph = new Map();
+        pipeline.nodes.forEach(n => {
+            const id = n.id || `node-${n.step}`;
+            graph.set(id, []);
+        });
+        
+        connections.forEach(conn => {
+            const targets = graph.get(conn.source) || [];
+            targets.push(conn.target);
+            graph.set(conn.source, targets);
+        });
+
+        // DFS로 순환 검사
+        const hasCycle = (nodeId, visited, recStack) => {
+            visited.add(nodeId);
+            recStack.add(nodeId);
+
+            const neighbors = graph.get(nodeId) || [];
+            for (const neighbor of neighbors) {
+                if (!visited.has(neighbor)) {
+                    if (hasCycle(neighbor, visited, recStack)) {
+                        return true;
+                    }
+                } else if (recStack.has(neighbor)) {
+                    return true;
+                }
+            }
+
+            recStack.delete(nodeId);
+            return false;
+        };
+
+        const visited = new Set();
+        const recStack = new Set();
+        for (const nodeId of graph.keys()) {
+            if (!visited.has(nodeId)) {
+                if (hasCycle(nodeId, visited, recStack)) {
+                    errors.push('파이프라인에 순환 참조가 있습니다.');
+                    break;
+                }
+            }
+        }
+
+        // 4. 중복 노드 ID 체크
+        const nodeIds = pipeline.nodes.map(n => n.id || `node-${n.step}`);
+        const uniqueIds = new Set(nodeIds);
+        if (nodeIds.length !== uniqueIds.size) {
+            errors.push('중복된 노드 ID가 있습니다.');
+        }
+
+        return errors;
     }, []);
 
     // 1) 선택된 로직의 메타/본문 로드 (지연 로드)
@@ -170,58 +245,85 @@ const LogicEditorPage = ({ selectedLogicId, onBack, onSave, defaultNewLogicName 
 
     // Python 코드 생성 및 미리보기
     const handleGenerateCode = useCallback(() => {
-        const editor = editorRef.current;
-        const area = areaRef.current;
+        try {
+            const editor = editorRef.current;
+            const area = areaRef.current;
 
-        const graph = editor && area ? exportGraph(editor, area) : { nodes: [], connections: [] };
+            const graph = editor && area ? exportGraph(editor, area) : { nodes: [], connections: [] };
 
-        const code = generatePythonCode(graph);
-        setGeneratedCode(code);
-        setShowCodePreview(true);
-    }, [editorRef, areaRef]);
+            const code = generatePythonCode(graph);
+            setGeneratedCode(code);
+            setShowCodePreview(true);
+        } catch (error) {
+            if (error.name === 'PipelineValidationError') {
+                toast.error(error.message);
+            } else {
+                toast.error('코드 생성 중 오류가 발생했습니다.');
+                console.error('Code generation error:', error);
+            }
+        }
+    }, [editorRef, areaRef, toast]);
 
     // Jupyter Notebook 다운로드
     const handleExportJupyter = useCallback(() => {
-        const editor = editorRef.current;
-        const area = areaRef.current;
+        try {
+            const editor = editorRef.current;
+            const area = areaRef.current;
 
-        const graph = editor && area ? exportGraph(editor, area) : { nodes: [], connections: [] };
+            const graph = editor && area ? exportGraph(editor, area) : { nodes: [], connections: [] };
 
-        const notebook = generateJupyterNotebook(graph, logicName || 'ML Pipeline');
-        
-        const blob = new Blob([notebook], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${logicName || 'pipeline'}.ipynb`;
-        a.click();
-        URL.revokeObjectURL(url);
+            const notebook = generateJupyterNotebook(graph, logicName || 'ML Pipeline');
+            
+            const blob = new Blob([notebook], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${logicName || 'pipeline'}.ipynb`;
+            a.click();
+            URL.revokeObjectURL(url);
 
-        toast.success('Jupyter Notebook이 다운로드되었습니다!');
+            toast.success('Jupyter Notebook이 다운로드되었습니다!');
+        } catch (error) {
+            if (error.name === 'PipelineValidationError') {
+                toast.error(error.message);
+            } else {
+                toast.error('Jupyter Notebook 생성 중 오류가 발생했습니다.');
+                console.error('Jupyter export error:', error);
+            }
+        }
     }, [editorRef, areaRef, logicName, toast]);
 
     // Python Script 다운로드
     const handleExportPython = useCallback(() => {
-        const editor = editorRef.current;
-        const area = areaRef.current;
+        try {
+            const editor = editorRef.current;
+            const area = areaRef.current;
 
-        const graph = editor && area ? exportGraph(editor, area) : { nodes: [], connections: [] };
+            const graph = editor && area ? exportGraph(editor, area) : { nodes: [], connections: [] };
 
-        const script = generatePythonScript(graph, logicName || 'ML Pipeline');
-        
-        const blob = new Blob([script], { type: 'text/x-python' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${logicName || 'pipeline'}.py`;
-        a.click();
-        URL.revokeObjectURL(url);
+            const script = generatePythonScript(graph, logicName || 'ML Pipeline');
+            
+            const blob = new Blob([script], { type: 'text/x-python' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${logicName || 'pipeline'}.py`;
+            a.click();
+            URL.revokeObjectURL(url);
 
-        toast.success('Python 스크립트가 다운로드되었습니다!');
+            toast.success('Python 스크립트가 다운로드되었습니다!');
+        } catch (error) {
+            if (error.name === 'PipelineValidationError') {
+                toast.error(error.message);
+            } else {
+                toast.error('Python 스크립트 생성 중 오류가 발생했습니다.');
+                console.error('Python export error:', error);
+            }
+        }
     }, [editorRef, areaRef, logicName, toast]);
 
     // Gemini에서 생성된 파이프라인을 캔버스에 추가
-    const handlePipelineGenerated = useCallback(async (pipeline) => {
+    const applyPipelineToCanvas = useCallback(async (pipeline) => {
         try {
             const editor = editorRef.current;
             const area = areaRef.current;
@@ -231,21 +333,32 @@ const LogicEditorPage = ({ selectedLogicId, onBack, onSave, defaultNewLogicName 
                 return;
             }
 
+            // ✅ 파이프라인 검증
+            const validationErrors = validatePipeline(pipeline);
+            if (validationErrors.length > 0) {
+                toast.error(`파이프라인 검증 실패: ${validationErrors[0]}`);
+                console.error('모든 검증 오류:', validationErrors);
+                return;
+            }
+
             // 노드 ID와 Rete 노드 객체 매핑
             const nodeMap = new Map();
 
             // 1. 모든 노드 생성
             for (const nodeData of pipeline.nodes) {
-                const node = await createNodeByKind(nodeData.type);
+                // nodeType 또는 type 속성 모두 지원
+                const nodeType = nodeData.nodeType || nodeData.type || nodeData.kind;
+                const node = createNodeByKind(nodeType);
                 
                 if (!node) {
-                    console.error(`노드 타입을 찾을 수 없습니다: ${nodeData.type}`);
+                    console.error(`노드 타입을 찾을 수 없습니다: ${nodeType}`);
                     continue;
                 }
 
                 // 컨트롤 값 설정
-                if (nodeData.controls) {
-                    for (const [key, value] of Object.entries(nodeData.controls)) {
+                if (nodeData.controls || nodeData.settings) {
+                    const settings = nodeData.controls || nodeData.settings;
+                    for (const [key, value] of Object.entries(settings)) {
                         const control = node.controls[key];
                         if (control) {
                             control.setValue(value);
@@ -257,10 +370,13 @@ const LogicEditorPage = ({ selectedLogicId, onBack, onSave, defaultNewLogicName 
                 await editor.addNode(node);
                 
                 // 위치 설정
-                await area.translate(node.id, nodeData.position);
+                if (nodeData.position) {
+                    await area.translate(node.id, nodeData.position);
+                }
                 
-                // 매핑 저장
-                nodeMap.set(nodeData.id, node);
+                // 매핑 저장 (원본 ID 사용)
+                const originalId = nodeData.id || `node-${nodeData.step}`;
+                nodeMap.set(originalId, node);
             }
 
 
@@ -269,15 +385,69 @@ const LogicEditorPage = ({ selectedLogicId, onBack, onSave, defaultNewLogicName 
             console.log('Pipeline connections:', connections);
             console.log('Node map:', nodeMap);
             
-            // 기존 연결 확인 함수
-            const connectionExists = (srcId, srcOut, tgtId, tgtIn) => {
-                const existingConns = editor.getConnections();
-                return existingConns.some(conn => 
-                    conn.source === srcId && 
-                    conn.sourceOutput === srcOut && 
-                    conn.target === tgtId && 
-                    conn.targetInput === tgtIn
+            // ✅ 성능 최적화: 소켓 이름 캐시
+            const socketCache = new Map();
+            const getSocketKey = (node, socketName, isOutput) => {
+                const cacheKey = `${node.id}_${isOutput ? 'out' : 'in'}_${socketName}`;
+                
+                if (socketCache.has(cacheKey)) {
+                    return socketCache.get(cacheKey);
+                }
+                
+                const sockets = isOutput ? node.outputs : node.inputs;
+                const socketKey = Object.keys(sockets).find(k => 
+                    k.toLowerCase() === socketName.toLowerCase()
                 );
+                
+                if (socketKey) {
+                    socketCache.set(cacheKey, socketKey);
+                }
+                
+                return socketKey;
+            };
+            
+            // 기존 연결 확인 함수 (더 강력한 체크)
+            const connectionExists = (srcId, srcOut, tgtId, tgtIn) => {
+                try {
+                    const existingConns = editor.getConnections();
+                    return existingConns.some(conn => 
+                        conn.source === srcId && 
+                        conn.sourceOutput === srcOut && 
+                        conn.target === tgtId && 
+                        conn.targetInput === tgtIn
+                    );
+                } catch (e) {
+                    console.warn('연결 체크 중 오류:', e);
+                    return false;
+                }
+            };
+            
+            // 연결 추가 시도 (중복 에러 무시)
+            const tryAddConnection = async (source, sourceOutput, target, targetInput) => {
+                // 이미 존재하는 연결인지 확인
+                if (connectionExists(source, sourceOutput, target, targetInput)) {
+                    console.warn(`⚠️ Connection already exists: ${source} (${sourceOutput}) -> ${target} (${targetInput})`);
+                    return false;
+                }
+                
+                try {
+                    await editor.addConnection({
+                        source,
+                        sourceOutput,
+                        target,
+                        targetInput
+                    });
+                    console.log(`✅ Connected: ${source} (${sourceOutput}) -> ${target} (${targetInput})`);
+                    return true;
+                } catch (err) {
+                    // "connection has already been added" 에러는 무시
+                    if (err.message && err.message.includes('already been added')) {
+                        console.warn(`⚠️ Connection already exists (caught): ${source} -> ${target}`);
+                        return false;
+                    }
+                    console.error('Connection error:', err);
+                    return false;
+                }
             };
             
             if (connections.length > 0) {
@@ -295,36 +465,17 @@ const LogicEditorPage = ({ selectedLogicId, onBack, onSave, defaultNewLogicName 
                     console.log(`Target node (${conn.target}) inputs:`, Object.keys(targetNode.inputs));
                     console.log(`Trying to connect: ${conn.sourceOutput} -> ${conn.targetInput}`);
                     
-                    // 정확한 소켓 이름 찾기
-                    const outputKey = Object.keys(sourceNode.outputs).find(k => 
-                        k.toLowerCase() === conn.sourceOutput.toLowerCase()
-                    );
-                    const inputKey = Object.keys(targetNode.inputs).find(k => 
-                        k.toLowerCase() === conn.targetInput.toLowerCase()
-                    );
+                    // ✅ 캐시된 소켓 조회 사용
+                    const outputKey = getSocketKey(sourceNode, conn.sourceOutput, true);
+                    const inputKey = getSocketKey(targetNode, conn.targetInput, false);
                     
                     if (!outputKey || !inputKey) {
                         console.error(`소켓을 찾을 수 없습니다: ${conn.sourceOutput} (${outputKey}) -> ${conn.targetInput} (${inputKey})`);
                         continue;
                     }
                     
-                    // 중복 연결 체크
-                    if (connectionExists(sourceNode.id, outputKey, targetNode.id, inputKey)) {
-                        console.warn(`⚠️ Connection already exists: ${sourceNode.label} -> ${targetNode.label}`);
-                        continue;
-                    }
-                    
-                    try {
-                        await editor.addConnection({
-                            source: sourceNode.id,
-                            sourceOutput: outputKey,
-                            target: targetNode.id,
-                            targetInput: inputKey
-                        });
-                        console.log(`✅ Connected: ${sourceNode.label} (${outputKey}) -> ${targetNode.label} (${inputKey})`);
-                    } catch (err) {
-                        console.error('Connection error:', err);
-                    }
+                    // 연결 시도
+                    await tryAddConnection(sourceNode.id, outputKey, targetNode.id, inputKey);
                 }
             } else {
                 // connections가 없으면 노드 순서대로 자동 연결 (출력→입력 1:1)
@@ -342,23 +493,8 @@ const LogicEditorPage = ({ selectedLogicId, onBack, onSave, defaultNewLogicName 
                     const dstIn = Object.keys(dst.inputs)[0];
                     
                     if (srcOut && dstIn) {
-                        // 중복 연결 체크
-                        if (connectionExists(src.id, srcOut, dst.id, dstIn)) {
-                            console.warn(`⚠️ Auto-connection already exists: ${src.label} -> ${dst.label}`);
-                            continue;
-                        }
-                        
-                        try {
-                            await editor.addConnection({
-                                source: src.id,
-                                sourceOutput: srcOut,
-                                target: dst.id,
-                                targetInput: dstIn
-                            });
-                            console.log(`✅ Auto-connected: ${src.label} (${srcOut}) -> ${dst.label} (${dstIn})`);
-                        } catch (err) {
-                            console.error('Auto-connection error:', err);
-                        }
+                        // 연결 시도
+                        await tryAddConnection(src.id, srcOut, dst.id, dstIn);
                     }
                 }
             }
@@ -439,37 +575,77 @@ const LogicEditorPage = ({ selectedLogicId, onBack, onSave, defaultNewLogicName 
                         title: '📊 Data Source', 
                         items: 
                         [ 
-                            { label: 'Data Loader', kind: 'dataLoader' }
+                            { 
+                                label: 'Data Loader', 
+                                kind: 'dataLoader',
+                                tip: 'CSV 파일에서 데이터 로드\n출력: data'
+                            }
                         ]
                     },
                     
                     {
                         title: '🔧 Preprocessing',
                         items: [
-                            { label: 'Data Split', kind: 'dataSplit' },
-                            { label: 'Scaler', kind: 'scaler' },
-                            { label: 'Feature Selection', kind: 'featureSelection' }
+                            { 
+                                label: 'Data Split', 
+                                kind: 'dataSplit',
+                                tip: '훈련/테스트 데이터 분할\n입력: data\n출력: X_train, y_train, X_test, y_test'
+                            },
+                            { 
+                                label: 'Scaler', 
+                                kind: 'scaler',
+                                tip: '데이터 정규화 (StandardScaler/MinMaxScaler)\n입력: X_train\n출력: X_train (정규화됨)'
+                            },
+                            { 
+                                label: 'Feature Selection', 
+                                kind: 'featureSelection',
+                                tip: '중요한 피처만 선택\n입력: X_train, y_train\n출력: X_train (선택된 피처)'
+                            }
                         ]
                     },
                     {
                         title: '🤖 Models',
                         items: [
-                            { label: 'Classifier', kind: 'classifier' },
-                            { label: 'Regressor', kind: 'regressor' },
-                            { label: 'Neural Network', kind: 'neuralNet' }
+                            { 
+                                label: 'Classifier', 
+                                kind: 'classifier',
+                                tip: '분류 모델 학습 (RandomForest, SVM 등)\n입력: X_train, y_train\n출력: model'
+                            },
+                            { 
+                                label: 'Regressor', 
+                                kind: 'regressor',
+                                tip: '회귀 모델 학습 (LinearRegression 등)\n입력: X_train, y_train\n출력: model'
+                            },
+                            { 
+                                label: 'Neural Network', 
+                                kind: 'neuralNet',
+                                tip: '신경망 모델 학습 (MLP)\n입력: X_train, y_train\n출력: model'
+                            }
                         ]
                     },
                     {
                         title: '📈 Evaluation',
                         items: [
-                            { label: 'Evaluate Model', kind: 'evaluate' },
-                            { label: 'Predict', kind: 'predict' }
+                            { 
+                                label: 'Evaluate Model', 
+                                kind: 'evaluate',
+                                tip: '모델 성능 평가\n옵션1: model + X_test + y_test\n옵션2: prediction + y_test\n출력: metrics'
+                            },
+                            { 
+                                label: 'Predict', 
+                                kind: 'predict',
+                                tip: '새 데이터 예측\n입력: model, X_test\n출력: prediction'
+                            }
                         ]
                     },
                     {
                         title: '⚙️ Optimization',
                         items: [
-                            { label: 'Hyperparameter Tuning', kind: 'hyperparamTune' }
+                            { 
+                                label: 'Hyperparameter Tuning', 
+                                kind: 'hyperparamTune',
+                                tip: '최적 하이퍼파라미터 탐색 (GridSearch)\n입력: X_train, y_train\n출력: model (최적화됨)'
+                            }
                         ]
                     }
                 ].map((group, i, arr) => (
@@ -485,7 +661,7 @@ const LogicEditorPage = ({ selectedLogicId, onBack, onSave, defaultNewLogicName 
                                     draggable
                                     onDragStart={(e) => onDragStart(e, item.kind)}
                                     className="p-3 text-center bg-neutral-800/80 border border-neutral-700 rounded-md shadow-sm cursor-grab select-none hover:bg-neutral-700"
-                                    title="드래그하여 캔버스로 가져오세요"
+                                    title={item.tip || "드래그하여 캔버스로 가져오세요"}
                                 >
                                     {item.label}
                                 </div>
@@ -512,8 +688,14 @@ const LogicEditorPage = ({ selectedLogicId, onBack, onSave, defaultNewLogicName 
 
             {/* 3. 정보 및 실행 패널 (오른쪽 사이드바) */}
             <div className="w-1/5 flex flex-col gap-4" style={{ maxHeight: 'calc(100vh - 200px)', overflowY: 'auto' }}>
+                {/* 초보자 가이드 */}
+                <BeginnerGuide />
+                
+                {/* 빠른 시작 템플릿 */}
+                <QuickStartTemplates onApplyTemplate={applyPipelineToCanvas} />
+                
                 {/* Gemini AI Python 코드 생성기 */}
-                <GeminiPipelineGenerator />
+                <GeminiPipelineGenerator onApplyPipeline={applyPipelineToCanvas} />
                 
                 {/* CSV 데이터 관리 */}
                 <CSVDataManager onSelectFile={(fileName) => {

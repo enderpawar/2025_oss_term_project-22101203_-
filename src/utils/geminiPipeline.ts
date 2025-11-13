@@ -34,7 +34,10 @@ export async function generatePythonCode(userPrompt: string): Promise<CodeGenera
     
     const systemPrompt = `당신은 머신러닝 전문가입니다. 사용자의 요구사항에 맞는 scikit-learn 기반 Python 코드를 생성하고, 노드 기반 에디터에서 구현하기 위한 **상세한 가이드**를 제공해주세요.
 
-**중요**: 노드 연결 정보를 명확히 포함해야 합니다!
+**중요**: 
+1. nodeName은 반드시 "영어이름(한국어설명)" 형식으로 작성해주세요. 예: "Data Loader (데이터 로더)"
+2. 노드 연결 정보를 명확히 포함해야 합니다!
+3. 소켓 이름은 표준 ML 명명 규칙을 따라야 합니다 (X_train, y_train, X_test, y_test, model, prediction, metrics)
 
 출력 형식 (반드시 JSON):
 \`\`\`json
@@ -44,7 +47,7 @@ export async function generatePythonCode(userPrompt: string): Promise<CodeGenera
     {
       "step": 1,
       "nodeType": "dataLoader",
-      "nodeName": "데이터 로더",
+      "nodeName": "Data Loader (데이터 로더)",
       "description": "CSV 파일에서 데이터를 로드합니다",
       "settings": {
         "fileName": "iris.csv"
@@ -56,7 +59,7 @@ export async function generatePythonCode(userPrompt: string): Promise<CodeGenera
     {
       "step": 2,
       "nodeType": "dataSplit",
-      "nodeName": "데이터 분할",
+      "nodeName": "Data Split (데이터 분할)",
       "description": "훈련/테스트 데이터로 분할합니다",
       "settings": {
         "ratio": 0.8,
@@ -64,7 +67,7 @@ export async function generatePythonCode(userPrompt: string): Promise<CodeGenera
       },
       "connections": {
         "from": [
-          { "step": 1, "output": "data" }
+          { "step": 1, "output": "data", "input": "data" }
         ],
         "to": []
       }
@@ -72,14 +75,14 @@ export async function generatePythonCode(userPrompt: string): Promise<CodeGenera
     {
       "step": 3,
       "nodeType": "scaler",
-      "nodeName": "표준 정규화",
+      "nodeName": "Scaler (표준 정규화)",
       "description": "StandardScaler로 데이터를 정규화합니다",
       "settings": {
         "method": "StandardScaler"
       },
       "connections": {
         "from": [
-          { "step": 2, "output": "X_train" }
+          { "step": 2, "output": "X_train", "input": "X_train" }
         ],
         "to": []
       }
@@ -90,50 +93,59 @@ export async function generatePythonCode(userPrompt: string): Promise<CodeGenera
 
 사용 가능한 노드 타입과 **정확한 입출력 소켓**:
 
-1. **dataLoader** (데이터 로더)
+1. **dataLoader** - "Data Loader (데이터 로더)"
    - 입력: 없음
    - 출력: **data**
    - settings: { fileName: "파일명.csv" }
 
-2. **dataSplit** (데이터 분할)
+2. **dataSplit** - "Data Split (데이터 분할)"
    - 입력: **data**
    - 출력: **X_train**, **y_train**, **X_test**, **y_test**
    - settings: { ratio: 0.8, targetColumn: "target" }
 
-3. **scaler** (정규화)
-   - 입력: **data** (보통 X_train을 연결)
-   - 출력: **scaled**
+3. **scaler** - "Scaler (정규화)"
+   - 입력: **X_train**
+   - 출력: **X_train**
    - settings: { method: "StandardScaler" 또는 "MinMaxScaler" }
+   - 참고: 입출력이 모두 X_train으로 같습니다 (변환된 데이터)
 
-4. **featureSelection** (피처 선택)
-   - 입력: **data**
-   - 출력: **selected**
+4. **featureSelection** - "Feature Selection (피처 선택)"
+   - 입력: **X_train**, **y_train**
+   - 출력: **X_train**
    - settings: { method: "SelectKBest", k: 10 }
+   - 참고: y_train이 필요하며, 선택된 피처를 X_train으로 출력합니다
 
-5. **classifier** (분류 모델)
+5. **classifier** - "Classifier (분류 모델)"
    - 입력: **X_train**, **y_train**
    - 출력: **model**
    - settings: { algorithm: "RandomForest", n_estimators: 100 }
 
-6. **regressor** (회귀 모델)
+6. **regressor** - "Regressor (회귀 모델)"
    - 입력: **X_train**, **y_train**
    - 출력: **model**
    - settings: { algorithm: "LinearRegression" }
 
-7. **neuralNet** (신경망)
+7. **neuralNet** - "Neural Network (신경망)"
    - 입력: **X_train**, **y_train**
    - 출력: **model**
    - settings: { layers: "64,32", epochs: 50 }
 
-8. **evaluate** (모델 평가)
-   - 입력: **model**, **X_test**, **y_test**
-   - 출력: **metrics**
+8. **hyperparamTune** - "Hyperparameter Tuning (하이퍼파라미터 튜닝)"
+   - 입력: **X_train**, **y_train**
+   - 출력: **model**
    - settings: {}
 
-9. **predict** (예측)
-   - 입력: **model**, **data**
+9. **predict** - "Predict (예측)"
+   - 입력: **model**, **X_test**
    - 출력: **prediction**
    - settings: {}
+
+10. **evaluate** - "Evaluate (모델 평가)"
+   - 입력 옵션 1: **model**, **X_test**, **y_test** (모델로부터 예측 생성)
+   - 입력 옵션 2: **prediction**, **y_test** (이미 생성된 예측값 사용)
+   - 출력: **metrics**
+   - settings: {}
+   - 참고: predict 노드 사용 시 옵션 2, 사용 안 하면 옵션 1
 
 **완전한 예시 - 아이리스 분류**:
 \`\`\`json
@@ -143,7 +155,7 @@ export async function generatePythonCode(userPrompt: string): Promise<CodeGenera
     {
       "step": 1,
       "nodeType": "dataLoader",
-      "nodeName": "아이리스 데이터 로더",
+      "nodeName": "Data Loader (아이리스 데이터 로더)",
       "description": "아이리스 데이터셋을 로드합니다",
       "settings": {
         "fileName": "iris.csv"
@@ -158,7 +170,7 @@ export async function generatePythonCode(userPrompt: string): Promise<CodeGenera
     {
       "step": 2,
       "nodeType": "dataSplit",
-      "nodeName": "데이터 분할",
+      "nodeName": "Data Split (데이터 분할)",
       "description": "80% 훈련, 20% 테스트로 분할합니다",
       "settings": {
         "ratio": 0.8,
@@ -169,7 +181,7 @@ export async function generatePythonCode(userPrompt: string): Promise<CodeGenera
           { "step": 1, "output": "data", "input": "data" }
         ],
         "to": [
-          { "step": 3, "output": "X_train", "input": "data" },
+          { "step": 3, "output": "X_train", "input": "X_train" },
           { "step": 4, "output": "y_train", "input": "y_train" },
           { "step": 5, "output": "X_test", "input": "X_test" },
           { "step": 5, "output": "y_test", "input": "y_test" }
@@ -179,24 +191,24 @@ export async function generatePythonCode(userPrompt: string): Promise<CodeGenera
     {
       "step": 3,
       "nodeType": "scaler",
-      "nodeName": "표준 정규화",
+      "nodeName": "Scaler (표준 정규화)",
       "description": "StandardScaler로 X_train을 정규화합니다",
       "settings": {
         "method": "StandardScaler"
       },
       "connections": {
         "from": [
-          { "step": 2, "output": "X_train", "input": "data" }
+          { "step": 2, "output": "X_train", "input": "X_train" }
         ],
         "to": [
-          { "step": 4, "output": "scaled", "input": "X_train" }
+          { "step": 4, "output": "X_train", "input": "X_train" }
         ]
       }
     },
     {
       "step": 4,
       "nodeType": "classifier",
-      "nodeName": "랜덤 포레스트 분류기",
+      "nodeName": "Classifier (랜덤 포레스트 분류기)",
       "description": "100개 트리를 가진 랜덤 포레스트로 학습합니다",
       "settings": {
         "algorithm": "RandomForest",
@@ -204,7 +216,7 @@ export async function generatePythonCode(userPrompt: string): Promise<CodeGenera
       },
       "connections": {
         "from": [
-          { "step": 3, "output": "scaled", "input": "X_train" },
+          { "step": 3, "output": "X_train", "input": "X_train" },
           { "step": 2, "output": "y_train", "input": "y_train" }
         ],
         "to": [
@@ -215,7 +227,7 @@ export async function generatePythonCode(userPrompt: string): Promise<CodeGenera
     {
       "step": 5,
       "nodeType": "evaluate",
-      "nodeName": "모델 평가",
+      "nodeName": "Evaluate (모델 평가)",
       "description": "정확도와 분류 리포트를 출력합니다",
       "settings": {},
       "connections": {
@@ -241,11 +253,11 @@ export async function generatePythonCode(userPrompt: string): Promise<CodeGenera
   - output: 현재 노드의 출력 소켓 이름
   - input: 다음 노드의 입력 소켓 이름
 
-예시:
-- scaler의 입력 "data"에 dataSplit의 출력 "X_train" 연결
-  → from: [{ step: 2, output: "X_train", input: "data" }]
-- scaler의 출력 "scaled"를 classifier의 입력 "X_train"에 연결
-  → to: [{ step: 4, output: "scaled", input: "X_train" }]
+**중요한 소켓 연결 패턴**:
+- scaler의 입력/출력이 모두 "X_train"입니다 → from: [{ output: "X_train", input: "X_train" }]
+- featureSelection도 입출력이 "X_train"이지만 "y_train"도 필요합니다
+- classifier/regressor/neuralNet는 모두 "model"을 출력합니다
+- evaluate는 "model"+"X_test"+"y_test" 또는 "prediction"+"y_test"를 입력받습니다
 
 이제 사용자 요구사항에 맞는 Python 코드와 **양방향 연결 정보를 포함한** 노드 가이드를 JSON 형식으로 생성해주세요.
 
